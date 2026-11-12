@@ -1,0 +1,15 @@
+name = "radar-concurseiro"
+main = "worker.js"
+compatibility_date = "2026-11-01"
+
+[triggers]
+crons = ["7 * * * *"]
+
+[vars]
+BOT_USERNAME = "COLOQUE_O_USUARIO_DO_BOT"
+MONITOR_URL = "https://monitor-de-provas-bruno.p4ladino777.workers.dev/"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "radar-concurseiro"
+database_id = "2ff1b326-b582-4e50-bb94-3ca36219132c"
