@@ -5,10 +5,13 @@
 // Cada fonte lista concursos como links. `padrao` testa o caminho do link.
 // Se uma banca mudar o site, é só ajustar aqui. O painel /api/fontes mostra quantos links cada uma achou.
 export const FONTES = [
-  { id: 'cebraspe-abertas', banca: 'Cebraspe', url: 'https://www.cebraspe.org.br/concursos/inscricoes-abertas', situacao: 'abertas',
-    padrao: /^\/concursos\/([a-z0-9_]+)\/?$/i, ignorar: ['inscricoes-abertas', 'em-andamento', 'encerrados', 'previstos'] },
-  { id: 'cebraspe-todos', banca: 'Cebraspe', url: 'https://www.cebraspe.org.br/concursos/', situacao: 'andamento',
-    padrao: /^\/concursos\/([a-z0-9_]+)\/?$/i, ignorar: ['inscricoes-abertas', 'em-andamento', 'encerrados', 'previstos'] },
+  // A Cebraspe monta a página com JavaScript; os dados vêm desta API
+  { id: 'cebraspe-abertas', banca: 'Cebraspe', tipo: 'json', situacao: 'abertas',
+    url: 'https://apis.cebraspe.org.br/cebraspe/eventos/tipo/concursos/fase/inscricoes-abertas', linkBase: 'https://www.cebraspe.org.br/concursos/' },
+  { id: 'cebraspe-andamento', banca: 'Cebraspe', tipo: 'json', situacao: 'andamento',
+    url: 'https://apis.cebraspe.org.br/cebraspe/eventos/tipo/concursos/fase/em-andamento', linkBase: 'https://www.cebraspe.org.br/concursos/' },
+  { id: 'cebraspe-novos', banca: 'Cebraspe', tipo: 'json', situacao: 'andamento',
+    url: 'https://apis.cebraspe.org.br/cebraspe/eventos/tipo/concursos/', linkBase: 'https://www.cebraspe.org.br/concursos/' },
   { id: 'fgv', banca: 'FGV', url: 'https://conhecimento.fgv.br/concursos', situacao: 'andamento',
     padrao: /^\/concursos\/([a-z0-9-]+)\/?$/i, ignorar: ['abertos', 'andamento', 'encerrados'] },
   { id: 'fcc', banca: 'FCC', url: 'https://www.concursosfcc.com.br/concursos/', situacao: 'andamento',
@@ -90,6 +93,24 @@ export function lerFonte(fonte, html) {
     const nome = c.nome || bonitoDoSlug(c.slug);
     return { id: c.id, banca: c.banca, url: c.url, nome, uf: detectarUF(c.slug, nome), situacao: fonte.situacao };
   });
+}
+
+// Lê respostas JSON de API (formato descoberto em tempo de execução: procura os campos mais prováveis)
+export function lerFonteJSON(fonte, texto) {
+  let dados = JSON.parse(texto);
+  if (!Array.isArray(dados)) dados = dados.data || dados.eventos || dados.itens || dados.items || dados.result || dados.value || Object.values(dados).find(Array.isArray) || [];
+  const pegarCampo = (o, nomes) => { for (const n of nomes) for (const k of Object.keys(o)) if (k.toLowerCase() === n && o[k] != null && o[k] !== '') return o[k]; return null; };
+  const out = [];
+  for (const it of dados) {
+    if (!it || typeof it !== 'object') continue;
+    const slug = String(pegarCampo(it, ['identificador', 'sigla', 'slug', 'codigo', 'code', 'chave', 'url', 'link', 'id']) || '').replace(/^.*\/concursos\//, '').replace(/\/$/, '');
+    const nome = tirarTags(String(pegarCampo(it, ['nome', 'titulo', 'title', 'descricao', 'nomeevento', 'name']) || slug));
+    if (!slug) continue;
+    const url = /^https?:/.test(slug) ? slug : fonte.linkBase + slug;
+    out.push({ id: `${fonte.banca.toLowerCase()}:${slug.toLowerCase()}`, banca: fonte.banca, url, nome: nome || bonitoDoSlug(slug),
+      uf: detectarUF(slug, nome), situacao: fonte.situacao });
+  }
+  return out;
 }
 
 // Documentos (PDFs, editais, resultados) na página de um concurso
@@ -240,12 +261,14 @@ async function rodarFontes(env, orc, log) {
   for (const fonte of FONTES) {
     if (!orc.pode()) break;
     try {
-      const r = await orc.fetch(fonte.url);
+      const r = await orc.fetch(fonte.url, fonte.tipo === 'json' ? { headers: { accept: 'application/json, text/plain, */*', referer: 'https://www.cebraspe.org.br/concursos/' } } : {});
       const html = await lerTexto(r);
-      await guardarAmostra(env, fonte.id, r, html);
+      if (fonte.tipo === 'json') await env.DB.prepare('INSERT INTO fontes_log(fonte,quando,links,amostra) VALUES(?,?,0,?) ON CONFLICT(fonte) DO UPDATE SET amostra=excluded.amostra')
+        .bind(fonte.id, agora(), JSON.stringify({ status: r.status, corpo: html.slice(0, 4000) })).run();
+      else await guardarAmostra(env, fonte.id, r, html);
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const lista = lerFonte(fonte, html);
-      if (!lista.length) await espiar(env, orc, fonte.id, r.url, html);
+      const lista = fonte.tipo === 'json' ? lerFonteJSON(fonte, html) : lerFonte(fonte, html);
+      if (!lista.length && fonte.tipo !== 'json') await espiar(env, orc, fonte.id, r.url, html);
       for (const c of lista) {
         const ja = vistosAgora.get(c.id);
         if (!ja || c.situacao === 'abertas') vistosAgora.set(c.id, { ...(ja || {}), ...c, nome: ja && ja.nome.length > c.nome.length ? ja.nome : c.nome });
