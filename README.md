@@ -16,3 +16,8 @@ Os avisos funcionam dentro do site, na aba Meus alertas. Para ligar o Telegram d
 
 ## Fontes
 As bancas ficam na lista `FONTES` no começo do `worker.js`. A aba Novidades mostra quantos concursos cada fonte achou na última rodada.
+
+## Como o robô funciona
+- Roda completo de hora em hora (minuto 7): lê as bancas, o DOU e os detalhes de cada concurso (cargos, inscrições, documentos).
+- Nos outros minutos só adianta detalhes pendentes e atende **sondas**: linhas na tabela `sondas` (url, modo) que o robô baixa e resume, usadas para investigar sites novos.
+- Bancas lidas: Cebraspe (API), FGV, FCC e Vunesp. IBFC, Idecan, Consulplan, Quadrix e Fundatec bloqueiam robôs; o Instituto AOCP monta a lista por JavaScript.

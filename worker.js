@@ -15,9 +15,11 @@ export const FONTES = [
     ignorar: ['concursos', 'concurso', 'exames', 'quem-somos', 'avaliacoes-educacionais', 'seguros', 'centro-de-pesquisa', 'publicacoes', 'eventos', 'videos', 'contatos'] })),
   { id: 'fcc', banca: 'FCC', url: 'https://www.concursosfcc.com.br/concursos/', situacao: 'andamento',
     padrao: /^\/concursos\/([a-z0-9]+)\/(?:index\.html?)?$/i, ignorar: ['jsp'] },
+  { id: 'fcc-abertas', banca: 'FCC', url: 'https://www.concursosfcc.com.br/concursoInscricaoAberta.html', situacao: 'abertas', primeiroTexto: true,
+    padrao: /^\/concursos\/([a-z0-9]+)\/(?:index\.html?)?$/i, ignorar: ['jsp'] },
   { id: 'fcc-destaques', banca: 'FCC', url: 'https://www.concursosfcc.com.br/concursos/bannersConcurso.js', situacao: 'andamento', tipo: 'urls',
     padrao: /^\/concursos\/([a-z0-9]+)\/(?:index\.html?)?$/i, ignorar: ['jsp'] },
-  ...['inscricoes%20abertas', 'em%20andamento', 'proximo'].flatMap((sit) => [1, 2, 3].map((pg) => ({
+  ...['inscricoes%20abertas', 'em%20andamento', 'proximo'].flatMap((sit) => (sit === 'em%20andamento' ? [1, 2, 3, 4, 5] : [1, 2]).map((pg) => ({
     id: `vunesp-${sit.replace(/%20/g, '-')}${pg > 1 ? '-' + pg : ''}`, banca: 'Vunesp', situacao: sit.startsWith('insc') ? 'abertas' : sit === 'proximo' ? 'novo' : 'andamento',
     url: pg === 1 ? `https://www.vunesp.com.br/busca/concurso/${sit}` : `https://www.vunesp.com.br/CarregarMais/${pg}/concurso/${sit}?httproute=True`,
     padrao: /^\/([A-Z]{2,}[0-9]{4})\/?$/, ignorar: [] }))),
@@ -109,7 +111,7 @@ export function lerFonte(fonte, html) {
     const atual = achados.get(id);
     const nome = bom ? texto : null;
     if (!atual) achados.set(id, { id, banca: fonte.banca, slug, url: url.origin + url.pathname, nome });
-    else if (nome && (!atual.nome || nome.length > atual.nome.length)) atual.nome = nome;
+    else if (nome && (!atual.nome || (!fonte.primeiroTexto && nome.length > atual.nome.length))) atual.nome = nome;
   }
   return [...achados.values()].map((c) => {
     const nome = c.nome || bonitoDoSlug(c.slug);
@@ -305,7 +307,6 @@ async function rodarFontes(env, orc, log) {
       else await guardarAmostra(env, fonte.id, r, html);
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const lista = fonte.tipo === 'json' ? lerFonteJSON(fonte, html) : lerFonte(fonte, html);
-      if (!lista.length && fonte.tipo !== 'json') await espiar(env, orc, fonte.id, r.url, html);
       for (const c of lista) {
         const ja = vistosAgora.get(c.id);
         const peso = { abertas: 3, novo: 2, andamento: 1 };
@@ -497,7 +498,7 @@ async function rodarDOU(env, orc, log, forcar = false) {
     try {
       const r = await orc.fetch(urlBuscaDOU(termo, periodo));
       const html = await lerTexto(r);
-      if (gente[0].token === '*') { await guardarAmostra(env, 'dou', r, html); if (!lerBuscaDOU(html)?.length) await espiar(env, orc, 'dou', r.url, html); }
+      if (gente[0].token === '*') { await guardarAmostra(env, 'dou', r, html); }
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const itens = lerBuscaDOU(html);
       if (itens === null) throw new Error('formato da busca do DOU mudou');
