@@ -570,6 +570,15 @@ async function webhookTelegram(req, env) {
   return new Response('ok');
 }
 
+// Atende sondas pendentes e pedidos de rodada (estado 'pedir_rodada' = '1')
+async function tique(env, rodadaCheia) {
+  const n = await rodarSondas(env, new Orcamento(20));
+  const pedido = await estado(env, 'pedir_rodada');
+  if (pedido === '1') await estado(env, 'pedir_rodada', '0');
+  if (pedido === '1' || rodadaCheia) await rodarRobo(env);
+  return n;
+}
+
 export default {
   async fetch(req, env, ctx) {
     const url = new URL(req.url);
@@ -585,6 +594,7 @@ export default {
         if (!env.ADMIN_KEY || url.searchParams.get('key') !== env.ADMIN_KEY) return json({ erro: 'chave errada' }, 403);
         return json(await telegram(env, 'setWebhook', { url: `${url.origin}/tg/${env.ADMIN_KEY}`, allowed_updates: ['message'] }));
       }
+      if (p === '/' && url.searchParams.has('tique')) await tique(env, false);
       if (p === '/' || p === '/index.html') {
         return new Response(PAGINA.replace('__MONITOR__', escHtml(env.MONITOR_URL || '')),
           { headers: { 'content-type': 'text/html; charset=utf-8' } });
@@ -595,12 +605,7 @@ export default {
     }
   },
   async scheduled(evento, env, ctx) {
-    ctx.waitUntil((async () => {
-      await rodarSondas(env, new Orcamento(20));
-      const pedido = await estado(env, 'pedir_rodada');
-      if (pedido === '1') await estado(env, 'pedir_rodada', '0');
-      if (pedido === '1' || new Date(evento.scheduledTime).getUTCMinutes() === 7) await rodarRobo(env);
-    })());
+    ctx.waitUntil(tique(env, new Date(evento.scheduledTime).getUTCMinutes() === 7));
   },
 };
 
