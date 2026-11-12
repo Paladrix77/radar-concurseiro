@@ -12,12 +12,20 @@ export const FONTES = [
   { id: 'fgv', banca: 'FGV', url: 'https://conhecimento.fgv.br/concursos', situacao: 'andamento',
     padrao: /^\/concursos\/([a-z0-9-]+)\/?$/i, ignorar: ['abertos', 'andamento', 'encerrados'] },
   { id: 'fcc', banca: 'FCC', url: 'https://www.concursosfcc.com.br/concursos/', situacao: 'andamento',
-    padrao: /^\/concursos\/([a-z0-9]+)\/?$/i, ignorar: [] },
+    padrao: /^\/concursos\/([a-z0-9]+)\/(?:index\.html?)?$/i, ignorar: ['jsp'] },
+  { id: 'vunesp-abertas', banca: 'Vunesp', url: 'https://www.vunesp.com.br/busca/concurso/inscricoes%20abertas', situacao: 'abertas',
+    padrao: /^\/([A-Z]{2,}[0-9]{4})\/?$/, ignorar: [] },
+  { id: 'vunesp-andamento', banca: 'Vunesp', url: 'https://www.vunesp.com.br/busca/concurso/em%20andamento', situacao: 'andamento',
+    padrao: /^\/([A-Z]{2,}[0-9]{4})\/?$/, ignorar: [] },
   { id: 'vunesp', banca: 'Vunesp', url: 'https://www.vunesp.com.br/', situacao: 'andamento',
     padrao: /^\/([A-Z]{2,}[0-9]{4})\/?$/, ignorar: [] },
 ];
 
 const UFS = new Set('AC AL AP AM BA CE DF ES GO MA MT MS MG PA PB PR PE PI RJ RN RS RO RR SC SP SE TO'.split(' '));
+const ESTADOS = Object.entries({ MS: 'mato grosso do sul', MT: 'mato grosso', RS: 'rio grande do sul', RN: 'rio grande do norte',
+  AC: 'acre', AL: 'alagoas', AP: 'amapa', AM: 'amazonas', BA: 'bahia', CE: 'ceara', DF: 'distrito federal', ES: 'espirito santo',
+  GO: 'goias', MA: 'maranhao', MG: 'minas gerais', PA: 'para)', PB: 'paraiba', PR: 'parana', PE: 'pernambuco', PI: 'piaui',
+  RJ: 'rio de janeiro', RO: 'rondonia', RR: 'roraima', SC: 'santa catarina', SP: 'sao paulo', SE: 'sergipe', TO: 'tocantins' });
 const TEXTOS_GENERICOS = /^(saiba mais|clique aqui|acesse|ver mais|mais|detalhes|\+|inscreva-se|inscri[cç][aã]o)$/i;
 const PALAVRAS_DOC = /(edital|retifica|resultado|gabarito|convoca|comunicado|homologa|aviso|cronograma|nomea|prova|recurso|local)/i;
 const HEADERS_NAVEGADOR = {
@@ -56,6 +64,8 @@ function bonitoDoSlug(slug) {
 export function detectarUF(slug, nome) {
   for (const t of slug.split(/[_-]+/)) if (UFS.has(t.toUpperCase())) return t.toUpperCase();
   for (const t of nome.split(/[\s/–-]+/)) if (t.length === 2 && t === t.toUpperCase() && UFS.has(t)) return t;
+  const n = nome.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  for (const [uf, est] of ESTADOS) if (n.includes(est)) return uf;
   return null;
 }
 
@@ -128,6 +138,20 @@ const enviar = (env, chatId, html) => !env.TELEGRAM_TOKEN ? null : telegram(env,
   { chat_id: chatId, text: html, parse_mode: 'HTML', disable_web_page_preview: true });
 
 // ---------- Robô ----------
+// Lê o corpo respeitando o charset (a FCC usa ISO-8859-1)
+export async function lerTexto(r) {
+  const buf = await r.arrayBuffer();
+  const ct = r.headers.get('content-type') || '';
+  let cs = (ct.match(/charset=([\w-]+)/i) || [])[1];
+  if (!cs) {
+    const cabeca = new TextDecoder('latin1').decode(buf.slice(0, 3000));
+    cs = (cabeca.match(/<meta[^>]+charset=["']?([\w-]+)/i) || [])[1] || 'utf-8';
+  }
+  cs = cs.toLowerCase();
+  if (cs === 'iso-8859-1' || cs === 'latin1') cs = 'windows-1252';
+  try { return new TextDecoder(cs).decode(buf); } catch { return new TextDecoder('utf-8').decode(buf); }
+}
+
 class Orcamento { // o plano grátis permite ~50 requisições externas por execução
   constructor(n) { this.n = n; }
   pode() { return this.n > 0; }
@@ -165,16 +189,48 @@ async function guardarAmostra(env, fonteId, r, html) {
   } catch {}
 }
 
+// Quando uma página é montada por JavaScript, procura de onde ela puxa os dados (APIs, JSON)
+async function espiar(env, orc, id, base, html) {
+  try {
+    if (orc.n < 8) return;
+    const pegar = (re, txt, max) => { const out = []; let m; while ((m = re.exec(txt)) && out.length < max) if (!out.includes(m[1])) out.push(m[1]); return out; };
+    const scripts = pegar(/<script[^>]*\bsrc=["']([^"']+)["']/gi, html, 30).map((u) => { try { return new URL(u, base).href; } catch { return null; } }).filter(Boolean);
+    const ids = pegar(/<script[^>]*\bid=["']([^"']+)["']/gi, html, 30);
+    const trechos = [];
+    for (const k of ['jsonArray', 'urlTitle', '/api/', 'api.', '.json', 'ajax', 'fetch(', 'resultado']) {
+      let i = html.indexOf(k), n = 0;
+      while (i >= 0 && n < 2) { trechos.push(k + ' => ' + html.slice(Math.max(0, i - 200), i + 300)); i = html.indexOf(k, i + 1); n++; }
+    }
+    const host = new URL(base).host;
+    const daMesmaCasa = scripts.filter((u) => new URL(u).host === host || /cebraspe|in\.gov/.test(u));
+    const apis = [];
+    for (const u of daMesmaCasa.slice(-5)) {
+      if (orc.n < 5) break;
+      const r = await orc.fetch(u);
+      const js = await r.text();
+      for (const x of pegar(/["'`](https?:\/\/[^"'`\s]{6,200})["'`]/g, js, 80)) if (/api|json|servic|concurso|busca/i.test(x)) apis.push(x);
+      for (const x of pegar(/["'`](\/?[a-zA-Z0-9_\-\/]*(?:api|Api|json|servic|concurso|Concurso)[a-zA-Z0-9_\-\/{}.?=&]*)["'`]/g, js, 120)) apis.push(x);
+    }
+    const amostra = { base, scripts, ids, trechos: trechos.slice(0, 12), apis: [...new Set(apis)].slice(0, 150) };
+    await env.DB.prepare('INSERT INTO fontes_log(fonte,quando,links,amostra) VALUES(?,?,0,?) ON CONFLICT(fonte) DO UPDATE SET quando=excluded.quando, amostra=excluded.amostra')
+      .bind('espiar:' + id, agora(), JSON.stringify(amostra)).run();
+  } catch (e) {
+    await env.DB.prepare('INSERT INTO fontes_log(fonte,quando,links,erro) VALUES(?,?,0,?) ON CONFLICT(fonte) DO UPDATE SET erro=excluded.erro')
+      .bind('espiar:' + id, agora(), String(e.message || e)).run();
+  }
+}
+
 async function rodarFontes(env, orc, log) {
   const vistosAgora = new Map();
   for (const fonte of FONTES) {
     if (!orc.pode()) break;
     try {
       const r = await orc.fetch(fonte.url);
-      const html = await r.text();
+      const html = await lerTexto(r);
       await guardarAmostra(env, fonte.id, r, html);
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const lista = lerFonte(fonte, html);
+      if (!lista.length) await espiar(env, orc, fonte.id, r.url, html);
       for (const c of lista) {
         const ja = vistosAgora.get(c.id);
         if (!ja || c.situacao === 'abertas') vistosAgora.set(c.id, { ...(ja || {}), ...c, nome: ja && ja.nome.length > c.nome.length ? ja.nome : c.nome });
@@ -241,7 +297,7 @@ async function rodarDocumentos(env, orc, log, limite = 20) {
     try {
       const r = await orc.fetch(c.url);
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const docs = lerDocumentos(await r.text(), c.url);
+      const docs = lerDocumentos(await lerTexto(r), c.url);
       const antes = c.docs_json ? JSON.parse(c.docs_json) : null;
       await env.DB.prepare('UPDATE concursos SET docs_json=?, docs_checado=? WHERE id=?').bind(JSON.stringify(docs), agora(), c.id).run();
       if (!antes) { log.push(`${c.id}: base de ${docs.length} documentos`); continue; }
@@ -279,8 +335,8 @@ async function rodarDOU(env, orc, log, forcar = false) {
     if (orc.n < 2) { log.push('DOU: orçamento acabou, continua na próxima'); break; }
     try {
       const r = await orc.fetch(urlBuscaDOU(termo));
-      const html = await r.text();
-      if (gente[0].token === '*') await guardarAmostra(env, 'dou', r, html);
+      const html = await lerTexto(r);
+      if (gente[0].token === '*') { await guardarAmostra(env, 'dou', r, html); if (!lerBuscaDOU(html)?.length) await espiar(env, orc, 'dou', r.url, html); }
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const itens = lerBuscaDOU(html);
       if (itens === null) throw new Error('formato da busca do DOU mudou');
@@ -304,7 +360,7 @@ async function rodarDOU(env, orc, log, forcar = false) {
 }
 
 export async function rodarRobo(env, { forcarDOU = false } = {}) {
-  const orc = new Orcamento(Number(env.LIMITE_REQUISICOES || 45));
+  const orc = new Orcamento(Number(env.LIMITE_REQUISICOES || 48));
   const log = [];
   await rodarFontes(env, orc, log);
   await rodarDOU(env, orc, log, forcarDOU);
@@ -344,7 +400,7 @@ async function api(req, env, url) {
   }
 
   if (p === '/api/fontes') {
-    const r = await env.DB.prepare('SELECT fonte,quando,links,erro FROM fontes_log ORDER BY fonte').all();
+    const r = await env.DB.prepare("SELECT fonte,quando,links,erro FROM fontes_log WHERE fonte NOT LIKE 'espiar:%' ORDER BY fonte").all();
     return json({ fontes: r.results, ultima_execucao: await estado(env, 'ultima_execucao') });
   }
 
