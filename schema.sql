@@ -13,7 +13,9 @@ CREATE TABLE IF NOT EXISTS concursos (
   salario TEXT,
   cargos TEXT,
   inscricoes TEXT,
-  busca TEXT
+  busca TEXT,
+  salario_num REAL,
+  nivel TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_concursos_visto ON concursos(ultimo_visto);
 CREATE TABLE IF NOT EXISTS usuarios (
