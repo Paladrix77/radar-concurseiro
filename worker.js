@@ -20,7 +20,11 @@ export const FONTES = [
 const UFS = new Set('AC AL AP AM BA CE DF ES GO MA MT MS MG PA PB PR PE PI RJ RN RS RO RR SC SP SE TO'.split(' '));
 const TEXTOS_GENERICOS = /^(saiba mais|clique aqui|acesse|ver mais|mais|detalhes|\+|inscreva-se|inscri[cç][aã]o)$/i;
 const PALAVRAS_DOC = /(edital|retifica|resultado|gabarito|convoca|comunicado|homologa|aviso|cronograma|nomea|prova|recurso|local)/i;
-const UA = 'Mozilla/5.0 (compatible; RadarConcurseiro/1.0)';
+const HEADERS_NAVEGADOR = {
+  'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+  'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+  'accept-language': 'pt-BR,pt;q=0.9,en;q=0.8',
+};
 
 // ---------- utilidades ----------
 const agora = () => new Date().toISOString();
@@ -129,7 +133,7 @@ class Orcamento { // o plano grátis permite ~50 requisições externas por exec
   pode() { return this.n > 0; }
   async fetch(url, init = {}) {
     this.n--;
-    return fetch(url, { ...init, headers: { 'user-agent': UA, ...(init.headers || {}) }, cf: { cacheTtl: 0 } });
+    return fetch(url, { ...init, headers: { ...HEADERS_NAVEGADOR, ...(init.headers || {}) }, redirect: 'follow', cf: { cacheTtl: 0 } });
   }
 }
 
@@ -142,14 +146,35 @@ async function estado(env, chave, valor) {
     .bind(chave, valor).run();
 }
 
+// Guarda um resumo da página baixada, para ajustar as fontes sem precisar abrir o site
+async function guardarAmostra(env, fonteId, r, html) {
+  try {
+    const titulo = (html.match(/<title[^>]*>([\s\S]*?)<\/title>/i) || [])[1] || '';
+    const host = new URL(r.url).host;
+    const caminhos = [];
+    for (const { url, texto } of extrairLinks(html, r.url)) {
+      if (url.host !== host) continue;
+      const k = url.pathname + url.search + ' | ' + texto.slice(0, 60);
+      if (!caminhos.includes(k)) caminhos.push(k);
+      if (caminhos.length >= 150) break;
+    }
+    const amostra = { status: r.status, url_final: r.url, tamanho: html.length, titulo: tirarTags(titulo),
+      inicio: caminhos.length ? undefined : html.slice(0, 1500), links: caminhos };
+    await env.DB.prepare('INSERT INTO fontes_log(fonte,quando,links,amostra) VALUES(?,?,0,?) ON CONFLICT(fonte) DO UPDATE SET amostra=excluded.amostra')
+      .bind(fonteId, agora(), JSON.stringify(amostra)).run();
+  } catch {}
+}
+
 async function rodarFontes(env, orc, log) {
   const vistosAgora = new Map();
   for (const fonte of FONTES) {
     if (!orc.pode()) break;
     try {
       const r = await orc.fetch(fonte.url);
+      const html = await r.text();
+      await guardarAmostra(env, fonte.id, r, html);
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const lista = lerFonte(fonte, await r.text());
+      const lista = lerFonte(fonte, html);
       for (const c of lista) {
         const ja = vistosAgora.get(c.id);
         if (!ja || c.situacao === 'abertas') vistosAgora.set(c.id, { ...(ja || {}), ...c, nome: ja && ja.nome.length > c.nome.length ? ja.nome : c.nome });
@@ -254,8 +279,10 @@ async function rodarDOU(env, orc, log, forcar = false) {
     if (orc.n < 2) { log.push('DOU: orçamento acabou, continua na próxima'); break; }
     try {
       const r = await orc.fetch(urlBuscaDOU(termo));
+      const html = await r.text();
+      if (gente[0].token === '*') await guardarAmostra(env, 'dou', r, html);
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const itens = lerBuscaDOU(await r.text());
+      const itens = lerBuscaDOU(html);
       if (itens === null) throw new Error('formato da busca do DOU mudou');
       for (const p of gente) {
         for (const it of itens.slice(0, 15)) {
@@ -317,7 +344,7 @@ async function api(req, env, url) {
   }
 
   if (p === '/api/fontes') {
-    const r = await env.DB.prepare('SELECT * FROM fontes_log ORDER BY fonte').all();
+    const r = await env.DB.prepare('SELECT fonte,quando,links,erro FROM fontes_log ORDER BY fonte').all();
     return json({ fontes: r.results, ultima_execucao: await estado(env, 'ultima_execucao') });
   }
 

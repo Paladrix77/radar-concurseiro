@@ -50,5 +50,6 @@ CREATE TABLE IF NOT EXISTS fontes_log (
   fonte TEXT PRIMARY KEY,
   quando TEXT,
   links INTEGER,
-  erro TEXT
+  erro TEXT,
+  amostra TEXT
 );
