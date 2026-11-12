@@ -6,7 +6,7 @@ compatibility_date = "2026-11-01"
 crons = ["7 * * * *"]
 
 [vars]
-BOT_USERNAME = "COLOQUE_O_USUARIO_DO_BOT"
+# BOT_USERNAME = "nome_do_bot"  (Telegram desativado por enquanto)
 MONITOR_URL = "https://monitor-de-provas-bruno.p4ladino777.workers.dev/"
 
 [[d1_databases]]

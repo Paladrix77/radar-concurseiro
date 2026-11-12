@@ -120,7 +120,7 @@ async function telegram(env, metodo, corpo) {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(corpo) });
   return r.json().catch(() => null);
 }
-const enviar = (env, chatId, html) => telegram(env, 'sendMessage',
+const enviar = (env, chatId, html) => !env.TELEGRAM_TOKEN ? null : telegram(env, 'sendMessage',
   { chat_id: chatId, text: html, parse_mode: 'HTML', disable_web_page_preview: true });
 
 // ---------- Robô ----------
@@ -189,7 +189,7 @@ async function rodarFontes(env, orc, log) {
     for (const c of lista) {
       await env.DB.prepare('INSERT INTO eventos(tipo,concurso_id,token,titulo,url,criado) VALUES(?,?,NULL,?,?,?)')
         .bind('novo_concurso', c.id, `Novo concurso na ${c.banca}: ${c.nome}`, c.url, t).run();
-      const users = await env.DB.prepare('SELECT chat_id FROM usuarios WHERE avisar_novos=1 AND chat_id IS NOT NULL').all();
+      const users = env.TELEGRAM_TOKEN ? await env.DB.prepare('SELECT chat_id FROM usuarios WHERE avisar_novos=1 AND chat_id IS NOT NULL').all() : { results: [] };
       for (const u of users.results) {
         if (!orc.pode()) break;
         orc.n--; await enviar(env, u.chat_id, `🆕 Novo concurso na <b>${c.banca}</b>\n${escHtml(c.nome)}\n${c.url}`);
@@ -204,7 +204,7 @@ async function avisarConcurso(env, concursoId, html, url, tipo, orc, titulo) {
   for (const u of quem.results) {
     await env.DB.prepare('INSERT INTO eventos(tipo,concurso_id,token,titulo,url,criado) VALUES(?,?,?,?,?,?)')
       .bind(tipo, concursoId, u.token, titulo || tirarTags(html), url, agora()).run();
-    if (u.chat_id && orc.pode()) { orc.n--; await enviar(env, u.chat_id, html + (url ? `\n${url}` : '')); }
+    if (u.chat_id && env.TELEGRAM_TOKEN && orc.pode()) { orc.n--; await enviar(env, u.chat_id, html + (url ? `\n${url}` : '')); }
   }
 }
 
@@ -265,7 +265,7 @@ async function rodarDOU(env, orc, log, forcar = false) {
           const tipo = p.token === '*' ? 'dou_concurso' : 'dou';
           await env.DB.prepare('INSERT INTO eventos(tipo,token,titulo,url,trecho,criado) VALUES(?,?,?,?,?,?)')
             .bind(tipo, tok, `${tipo === 'dou' ? `"${termo}" no DOU: ` : ''}${it.titulo}`, it.url, [it.orgao, it.secao, it.trecho].filter(Boolean).join(' · '), agora()).run();
-          if (p.chat_id && orc.pode()) {
+          if (p.chat_id && env.TELEGRAM_TOKEN && orc.pode()) {
             orc.n--;
             await enviar(env, p.chat_id, `🔔 <b>"${escHtml(termo)}"</b> apareceu no Diário Oficial\n<b>${escHtml(it.titulo)}</b>\n${escHtml(it.orgao)} ${escHtml(it.secao)}\n<i>${escHtml(it.trecho.slice(0, 250))}</i>\n${it.url}`);
           }
@@ -341,7 +341,7 @@ async function api(req, env, url) {
       env.DB.prepare('SELECT c.id,c.nome,c.banca,c.url,c.situacao,c.docs_checado FROM acompanhando a JOIN concursos c ON c.id=a.concurso_id WHERE a.token=? ORDER BY a.criado DESC').bind(u.token).all(),
       env.DB.prepare('SELECT * FROM eventos WHERE token=? ORDER BY id DESC LIMIT 60').bind(u.token).all(),
     ]);
-    return json({ conectado: !!u.chat_id, avisar_novos: !!u.avisar_novos, bot: env.BOT_USERNAME || null,
+    return json({ conectado: !!u.chat_id, avisar_novos: !!u.avisar_novos, bot: (env.TELEGRAM_TOKEN && env.BOT_USERNAME) || null,
       termos: termos.results, acompanhando: acomp.results, eventos: ev.results });
   }
 
@@ -496,10 +496,10 @@ input,select{width:100%;padding:11px 12px;border:1px solid var(--linha);border-r
 <section id="aba-alertas" hidden>
   <div class="bloco" id="blocoTg"></div>
   <div class="bloco"><h2>Vigiar no Diário Oficial</h2>
-    <p>Coloque seu nome completo, um cargo ou um órgão. Se aparecer no Diário Oficial da União, você recebe o aviso.</p>
+    <p>Coloque seu nome completo, um cargo ou um órgão. Se aparecer no Diário Oficial da União, o aviso aparece aqui em Meus avisos.</p>
     <form class="linha" id="formTermo"><input id="novoTermo" placeholder="Ex.: Maria da Silva Souza" maxlength="120"><button class="btn">Adicionar</button></form>
     <div id="termos"></div></div>
-  <div class="bloco"><h2>Concursos que acompanho</h2><p>Quando sair edital, retificação, gabarito ou resultado novo na página da banca, você é avisado.</p><div id="acomp"></div></div>
+  <div class="bloco"><h2>Concursos que acompanho</h2><p>Quando sair edital, retificação, gabarito ou resultado novo na página da banca, o aviso aparece aqui.</p><div id="acomp"></div></div>
   <div class="bloco"><h2>Meus avisos</h2><div id="meusEventos"></div></div>
 </section>
 <section id="aba-novidades" hidden>
@@ -533,11 +533,12 @@ function desenhar(){const q=$('#fBusca').value.trim().toLowerCase().normalize('N
   $('#lista').innerHTML=l.map(c=>'<div class="card"><div class="meio"><h3><a href="'+esc(c.url)+'" target="_blank" rel="noopener">'+esc(c.nome)+'</a></h3><div class="meta"><span class="tag">'+esc(c.banca)+'</span>'+(c.situacao==='abertas'?'<span class="tag aberta">Inscrições abertas</span>':'')+(c.uf?'<span>'+esc(c.uf)+'</span>':'')+'<span>visto '+quando(c.primeiro_visto)+'</span></div></div><button class="estrela'+(c.acompanhando?' on':'')+'" data-id="'+esc(c.id)+'">'+(c.acompanhando?'★ Acompanhando':'☆ Acompanhar')+'</button></div>').join('')}
 ['#fBusca','#fBanca','#fUF','#fSit'].forEach(s=>$(s).addEventListener('input',desenhar));
 document.querySelector('[data-so]').onclick=e=>{soAcomp=!soAcomp;e.target.classList.toggle('ativo',soAcomp);desenhar()};
-$('#lista').onclick=async e=>{const b=e.target.closest('.estrela');if(!b)return;const c=todos.find(x=>x.id===b.dataset.id);try{await garantirUsuario();await chamar('/api/acompanhar',{method:'POST',body:JSON.stringify({concurso_id:c.id,ativo:!c.acompanhando})});c.acompanhando=c.acompanhando?0:1;desenhar();toast(c.acompanhando?'Você vai ser avisado das novidades':'Parou de acompanhar')}catch(err){toast(err.message)}};
+$('#lista').onclick=async e=>{const b=e.target.closest('.estrela');if(!b)return;const c=todos.find(x=>x.id===b.dataset.id);try{await garantirUsuario();await chamar('/api/acompanhar',{method:'POST',body:JSON.stringify({concurso_id:c.id,ativo:!c.acompanhando})});c.acompanhando=c.acompanhando?0:1;desenhar();toast(c.acompanhando?'Novidades desse concurso vão aparecer em Meus alertas':'Parou de acompanhar')}catch(err){toast(err.message)}};
 
 async function carregarMe(){try{await garantirUsuario();me=await chamar('/api/me')}catch(e){$('#blocoTg').innerHTML='<p>Não consegui carregar.</p>';return}
   const link=me.bot?'https://t.me/'+me.bot+'?start='+TOKEN:null;
-  $('#blocoTg').innerHTML=me.conectado?'<h2>Telegram <span class="ok">● conectado</span></h2><p>Os avisos chegam no seu Telegram.</p><label style="display:flex;gap:8px;align-items:center;margin-bottom:12px"><input type="checkbox" id="cNovos" style="width:auto" '+(me.avisar_novos?'checked':'')+'> Avisar também quando surgir qualquer concurso novo</label><button class="btn leve" id="bTeste">Mandar um teste</button>'
+  $('#blocoTg').hidden=!me.bot;
+  $('#blocoTg').innerHTML=!me.bot?'':me.conectado?'<h2>Telegram <span class="ok">● conectado</span></h2><p>Os avisos chegam no seu Telegram.</p><label style="display:flex;gap:8px;align-items:center;margin-bottom:12px"><input type="checkbox" id="cNovos" style="width:auto" '+(me.avisar_novos?'checked':'')+'> Avisar também quando surgir qualquer concurso novo</label><button class="btn leve" id="bTeste">Mandar um teste</button>'
    :'<h2>Receber avisos no Telegram</h2><p>Toque no botão, abra o Telegram e aperte <b>Iniciar</b>. Depois volte aqui.</p>'+(link?'<a class="btn" href="'+link+'" target="_blank">Conectar Telegram</a> <button class="btn leve" id="bAtual">Já conectei</button>':'<p>O bot ainda não foi configurado.</p>');
   $('#cNovos')&&($('#cNovos').onchange=e=>chamar('/api/config',{method:'POST',body:JSON.stringify({avisar_novos:e.target.checked})}).then(()=>toast('Salvo')));
   $('#bTeste')&&($('#bTeste').onclick=()=>chamar('/api/teste-telegram',{method:'POST'}).then(()=>toast('Teste enviado')).catch(e=>toast(e.message)));
