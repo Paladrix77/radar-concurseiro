@@ -10,7 +10,10 @@ CREATE TABLE IF NOT EXISTS concursos (
   docs_json TEXT,
   docs_checado TEXT,
   vagas TEXT,
-  salario TEXT
+  salario TEXT,
+  cargos TEXT,
+  inscricoes TEXT,
+  busca TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_concursos_visto ON concursos(ultimo_visto);
 CREATE TABLE IF NOT EXISTS usuarios (

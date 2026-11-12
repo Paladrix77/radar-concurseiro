@@ -8,8 +8,11 @@ export const FONTES = [
   // A Cebraspe monta a página com JavaScript; os dados vêm desta API
   { id: 'cebraspe', banca: 'Cebraspe', tipo: 'json', situacao: 'andamento',
     url: 'https://apis.cebraspe.org.br/cebraspe/eventos/tipo/concursos/', linkBase: 'https://www.cebraspe.org.br/concursos/' },
-  { id: 'fgv', banca: 'FGV', url: 'https://conhecimento.fgv.br/concursos', situacao: 'andamento',
-    padrao: /^\/concursos\/([a-z0-9-]+)\/?$/i, ignorar: ['abertos', 'andamento', 'encerrados'] },
+  // FGV: a página tem "em andamento" e "realizados"; só interessa o primeiro bloco
+  ...[0, 1, 2].map((pg) => ({ id: pg ? `fgv-${pg + 1}` : 'fgv', banca: 'FGV', url: `https://conhecimento.fgv.br/concursos?page=${pg}`, situacao: 'andamento',
+    recorte: ['view-concursos-em-andamento', 'view-concursos-realizados'],
+    padrao: /^\/(?:(?:concursos?|processoseletivo)\/)?([a-z0-9-]+)\/?$/i,
+    ignorar: ['concursos', 'concurso', 'exames', 'quem-somos', 'avaliacoes-educacionais', 'seguros', 'centro-de-pesquisa', 'publicacoes', 'eventos', 'videos', 'contatos'] })),
   { id: 'fcc', banca: 'FCC', url: 'https://www.concursosfcc.com.br/concursos/', situacao: 'andamento',
     padrao: /^\/concursos\/([a-z0-9]+)\/(?:index\.html?)?$/i, ignorar: ['jsp'] },
   { id: 'vunesp-abertas', banca: 'Vunesp', url: 'https://www.vunesp.com.br/busca/concurso/inscricoes%20abertas', situacao: 'abertas',
@@ -35,6 +38,18 @@ const HEADERS_NAVEGADOR = {
 
 // ---------- utilidades ----------
 const agora = () => new Date().toISOString();
+const norm = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+// "psicólogos" -> "psicolog": assim a busca acha psicólogo, psicóloga e psicologia
+export function raizes(q) {
+  return norm(q).split(/[^a-z0-9]+/).filter((w) => w.length >= 2).map((w) => {
+    if (w.length > 4 && w.endsWith('s')) w = w.slice(0, -1);
+    if (w.length > 6 && w.endsWith('ia')) w = w.slice(0, -2);
+    else if (w.length > 5 && /[aeo]$/.test(w)) w = w.slice(0, -1);
+    return w;
+  }).slice(0, 5);
+}
+const HEADERS_API = { accept: 'application/json, text/plain, */*', referer: 'https://www.cebraspe.org.br/concursos/', origin: 'https://www.cebraspe.org.br' };
+const EH_CODIGO = /^[A-Z]{2,}\d{4}$/;
 const horaBrasilia = (d = new Date()) => (d.getUTCHours() + 21) % 24;
 const hojeBrasilia = (d = new Date()) => new Date(d.getTime() - 3 * 3600e3).toISOString().slice(0, 10);
 const tirarTags = (s) => s.replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&')
@@ -71,6 +86,11 @@ export function detectarUF(slug, nome) {
 // Lê a página de uma fonte e devolve os concursos achados
 export function lerFonte(fonte, html) {
   const host = new URL(fonte.url).host;
+  if (fonte.recorte) {
+    const i = html.indexOf(fonte.recorte[0]);
+    const f = i >= 0 ? html.indexOf(fonte.recorte[1], i + 1) : -1;
+    html = i >= 0 ? html.slice(i, f > i ? f : undefined) : '';
+  }
   const achados = new Map();
   for (const { url, texto } of extrairLinks(html, fonte.url)) {
     if (url.host !== host) continue;
@@ -103,7 +123,7 @@ export function lerFonteJSON(fonte, texto) {
       const slug = String(e.eventoURL).trim();
       const nome = tirarTags(e.eventoNomeCompleto || e.eventoNomeAbreviado || bonitoDoSlug(slug));
       const sal = e.eventoSalarioMaximo > 0 ? e.strEventoSalarioMaximo : null;
-      out.push({ id: `${fonte.banca.toLowerCase()}:${slug.toLowerCase()}`, banca: fonte.banca, url: fonte.linkBase + slug.toLowerCase(), nome,
+      out.push({ id: `${fonte.banca.toLowerCase()}:${slug.toLowerCase()}`, banca: fonte.banca, url: fonte.linkBase + slug, nome,
         uf: detectarUF(slug, nome), situacao: e.eventoStatus === 'inscricoes-abertas' ? 'abertas' : e.eventoStatus === 'novos' ? 'novo' : 'andamento',
         vagas: e.eventoTotalVagas || null, salario: sal });
     }
@@ -302,12 +322,12 @@ async function rodarFontes(env, orc, log) {
   const lote = [];
   for (const c of vistosAgora.values()) {
     if (!existentes.has(c.id)) {
-      lote.push(env.DB.prepare('INSERT INTO concursos(id,banca,nome,url,situacao,uf,primeiro_visto,ultimo_visto,vagas,salario) VALUES(?,?,?,?,?,?,?,?,?,?)')
-        .bind(c.id, c.banca, c.nome, c.url, c.situacao, c.uf, t, t, c.vagas || null, c.salario || null));
+      lote.push(env.DB.prepare('INSERT INTO concursos(id,banca,nome,url,situacao,uf,primeiro_visto,ultimo_visto,vagas,salario,busca) VALUES(?,?,?,?,?,?,?,?,?,?,?)')
+        .bind(c.id, c.banca, c.nome, c.url, c.situacao, c.uf, t, t, c.vagas || null, c.salario || null, norm(c.nome)));
       novos.push(c);
     } else {
-      lote.push(env.DB.prepare('UPDATE concursos SET nome=?, situacao=?, uf=COALESCE(?,uf), ultimo_visto=?, vagas=COALESCE(?,vagas), salario=COALESCE(?,salario) WHERE id=?')
-        .bind(c.nome, c.situacao, c.uf, t, c.vagas || null, c.salario || null, c.id));
+      lote.push(env.DB.prepare('UPDATE concursos SET nome=COALESCE(?,nome), url=?, situacao=?, uf=COALESCE(?,uf), ultimo_visto=?, vagas=COALESCE(?,vagas), salario=COALESCE(?,salario) WHERE id=?')
+        .bind(EH_CODIGO.test(c.nome) ? null : c.nome, c.url, c.situacao, c.uf, t, c.vagas || null, c.salario || null, c.id));
       if (existentes.get(c.id) !== 'abertas' && c.situacao === 'abertas') abriram.push(c);
     }
   }
@@ -341,30 +361,96 @@ async function avisarConcurso(env, concursoId, html, url, tipo, orc, titulo) {
   }
 }
 
-async function rodarDocumentos(env, orc, log, limite = 20) {
-  const lista = await env.DB.prepare(`SELECT c.* FROM concursos c WHERE c.id IN (SELECT DISTINCT concurso_id FROM acompanhando)
-    ORDER BY COALESCE(c.docs_checado,'') ASC LIMIT ?`).bind(limite).all();
+// Detalhe de um concurso da Cebraspe (API): cargos, período de inscrição e arquivos
+export function detalheCebraspe(d, slug) {
+  const cargos = (d.eventoCargos || []).map((x) => tirarTags(String((x && x.area) || '')).replace(/^Cargo\s*\d+\s*:\s*/i, '')).filter(Boolean);
+  const docs = [];
+  for (const a of [...(d.arquivosEdital || []), ...(d.arquivosGabarito || [])]) {
+    if (!a || !a.nomeArquivo || /vlibras/i.test(a.descricaoArquivo || '')) continue;
+    const url = a.isGuid ? `https://cdn.cebraspe.org.br/${a.nomeArquivo}` : `https://cdn.cebraspe.org.br/concursos/${slug}/arquivos/${a.nomeArquivo}`;
+    docs.push({ url, texto: tirarTags(a.descricaoArquivo || a.nomeArquivo).slice(0, 200) });
+  }
+  const insc = d.periodoInscricao ? tirarTags(d.periodoInscricao).replace(/,?\s*hor[aá]rio oficial.*$/i, '') : null;
+  return { cargos, docs, inscricoes: insc, texto: '', nome: null, vagas: null };
+}
+// Detalhe pela página HTML do concurso (FCC, Vunesp): texto para busca, documentos e, na Vunesp, o nome
+export function detalheHtml(c, html) {
+  let texto = tirarTags(html.replace(/<(script|style|noscript)[\s\S]*?<\/\1>/gi, ' '));
+  const titulo = tirarTags((html.match(/<title[^>]*>([\s\S]*?)<\/title>/i) || [])[1] || '');
+  const out = { cargos: [], docs: lerDocumentos(html, c.url), inscricoes: null, nome: null, vagas: null };
+  if (c.banca === 'Vunesp') {
+    const cod = c.id.split(':')[1].toUpperCase();
+    const i = texto.lastIndexOf(cod); if (i > 0) texto = texto.slice(i);
+    const f = texto.indexOf('Home Quem Somos'); if (f > 0) texto = texto.slice(0, f);
+    if (titulo && !/^Funda..o Vunesp/i.test(titulo)) {
+      const [tipo, org] = titulo.split('|').map((x) => x.trim());
+      out.nome = (org ? `${org} – ${tipo}` : titulo).slice(0, 160);
+    }
+    const m = texto.match(/Inscri..es:\s*(\d{2}\/\d{2})\s*(?:a\s*)?(\d{2}\/\d{2})/i); if (m) out.inscricoes = `De ${m[1]} a ${m[2]}`;
+    const v = texto.match(/Vagas:?\s*([\d.]+)/i); if (v) out.vagas = v[1];
+  }
+  out.texto = texto.slice(0, 6000);
+  return out;
+}
+function termoBate(termo, busca) {
+  const t = norm(termo).trim();
+  if (/\s/.test(t)) return busca.includes(t);
+  const rz = raizes(t);
+  return rz.length > 0 && busca.includes(rz[0]);
+}
+
+async function rodarDetalhes(env, orc, log, limite, soNuncaVistos) {
+  const lista = await env.DB.prepare(`SELECT c.*, EXISTS(SELECT 1 FROM acompanhando a WHERE a.concurso_id=c.id) AS seguido FROM concursos c
+    WHERE c.banca<>'FGV' AND c.ultimo_visto > datetime('now','-3 days') ${soNuncaVistos ? 'AND c.docs_checado IS NULL' : ''}
+    ORDER BY (c.docs_checado IS NULL) DESC, seguido DESC, c.docs_checado ASC LIMIT ?`).bind(limite).all();
+  if (!lista.results.length) return 0;
+  const termos = (await env.DB.prepare('SELECT t.token, t.termo, u.chat_id FROM termos t JOIN usuarios u ON u.token=t.token').all()).results;
+  let feitos = 0;
   for (const c of lista.results) {
-    if (orc.n < 3) break;
+    if (orc.n < 2) break;
     try {
-      const r = await orc.fetch(c.url);
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const docs = lerDocumentos(await lerTexto(r), c.url);
-      const antes = c.docs_json ? JSON.parse(c.docs_json) : null;
-      await env.DB.prepare('UPDATE concursos SET docs_json=?, docs_checado=? WHERE id=?').bind(JSON.stringify(docs), agora(), c.id).run();
-      if (!antes) { log.push(`${c.id}: base de ${docs.length} documentos`); continue; }
-      const conhecidos = new Set(antes.map((d) => d.url));
-      const novos = docs.filter((d) => !conhecidos.has(d.url));
-      for (const d of novos.slice(0, 5)) {
-        await avisarConcurso(env, c.id, `📄 Novo documento em <b>${escHtml(c.nome)}</b>\n${escHtml(d.texto)}`, d.url, 'novo_documento', orc,
-          `${c.nome}: ${d.texto}`);
+      let det;
+      if (c.banca === 'Cebraspe') {
+        const slug = c.url.replace(/\/$/, '').split('/').pop();
+        const r = await orc.fetch(`https://apis.cebraspe.org.br/cebraspe/eventos/${slug}`, { headers: HEADERS_API });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const txt = await r.text();
+        if (!txt) throw new Error('sem detalhe');
+        det = detalheCebraspe(JSON.parse(txt), slug);
+      } else {
+        const r = await orc.fetch(c.url);
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        det = detalheHtml(c, await lerTexto(r));
       }
-      log.push(`${c.id}: ${novos.length} documentos novos`);
+      const nome = det.nome || c.nome;
+      const busca = norm([nome, det.cargos.join(' '), det.texto].join(' ')).slice(0, 7000);
+      const antes = c.docs_json ? JSON.parse(c.docs_json) : null;
+      await env.DB.prepare('UPDATE concursos SET nome=?, cargos=?, inscricoes=COALESCE(?,inscricoes), vagas=COALESCE(vagas,?), busca=?, docs_json=?, docs_checado=? WHERE id=?')
+        .bind(nome, JSON.stringify(det.cargos.slice(0, 120)), det.inscricoes, det.vagas, busca, JSON.stringify(det.docs), agora(), c.id).run();
+      feitos++;
+      if (antes) {
+        const conhecidos = new Set(antes.map((d) => d.url));
+        const novos = det.docs.filter((d) => !conhecidos.has(d.url));
+        for (const d of novos.slice(0, 5)) {
+          await avisarConcurso(env, c.id, `📄 Novo documento em <b>${escHtml(nome)}</b>\n${escHtml(d.texto)}`, d.url, 'novo_documento', orc, `${nome}: ${d.texto}`);
+        }
+        if (novos.length) log.push(`${c.id}: ${novos.length} documentos novos`);
+      }
+      for (const t of termos) {
+        if (!termoBate(t.termo, busca)) continue;
+        const ins = await env.DB.prepare('INSERT OR IGNORE INTO dou_vistos(token,url) VALUES(?,?)').bind(t.token, `cargo:${t.termo.toLowerCase()}:${c.id}`).run();
+        if (!ins.meta.changes) continue;
+        await env.DB.prepare('INSERT INTO eventos(tipo,concurso_id,token,titulo,url,trecho,criado) VALUES(?,?,?,?,?,?,?)')
+          .bind('cargo', c.id, t.token, `"${t.termo}" aparece no concurso ${nome}`, c.url, [c.banca, det.inscricoes].filter(Boolean).join(' · '), agora()).run();
+        if (t.chat_id && env.TELEGRAM_TOKEN && orc.pode()) { orc.n--; await enviar(env, t.chat_id, `🎯 <b>"${escHtml(t.termo)}"</b> aparece no concurso <b>${escHtml(nome)}</b> (${c.banca})\n${c.url}`); }
+      }
     } catch (e) {
       await env.DB.prepare('UPDATE concursos SET docs_checado=? WHERE id=?').bind(agora(), c.id).run();
       log.push(`${c.id}: ERRO ${e.message || e}`);
     }
   }
+  log.push(`detalhes: ${feitos} concursos lidos`);
+  return feitos;
 }
 
 const TERMO_DESCOBERTA = 'concurso público';
@@ -452,7 +538,7 @@ export async function rodarRobo(env, { forcarDOU = false } = {}) {
   const log = [];
   await rodarFontes(env, orc, log);
   await rodarDOU(env, orc, log, forcarDOU);
-  await rodarDocumentos(env, orc, log);
+  await rodarDetalhes(env, orc, log, 30, false);
   await estado(env, 'ultima_execucao', agora());
   log.push(`requisições restantes: ${orc.n}`);
   return log;
@@ -476,11 +562,11 @@ async function api(req, env, url) {
     const uf = url.searchParams.get('uf') || '';
     const tok = req.headers.get('x-token') || '';
     const where = ["c.ultimo_visto > datetime('now','-10 days')"]; const args = [tok];
-    if (q) { where.push('c.nome LIKE ?'); args.push(`%${q}%`); }
+    for (const w of raizes(q)) { where.push("(COALESCE(c.busca,'') LIKE ? OR lower(c.nome) LIKE ?)"); args.push(`%${w}%`, `%${w}%`); }
     if (banca) { where.push('c.banca = ?'); args.push(banca); }
     if (sit) { where.push('c.situacao = ?'); args.push(sit); }
     if (uf) { where.push('c.uf = ?'); args.push(uf); }
-    const r = await env.DB.prepare(`SELECT c.id,c.banca,c.nome,c.url,c.situacao,c.uf,c.primeiro_visto,c.vagas,c.salario,
+    const r = await env.DB.prepare(`SELECT c.id,c.banca,c.nome,c.url,c.situacao,c.uf,c.primeiro_visto,c.vagas,c.salario,c.cargos,c.inscricoes,
       EXISTS(SELECT 1 FROM acompanhando a WHERE a.token=? AND a.concurso_id=c.id) AS acompanhando
       FROM concursos c WHERE ${where.join(' AND ')}
       ORDER BY (c.situacao='abertas') DESC, (c.situacao='novo') DESC, c.primeiro_visto DESC LIMIT 400`).bind(...args).all();
@@ -576,6 +662,7 @@ async function tique(env, rodadaCheia) {
   const pedido = await estado(env, 'pedir_rodada');
   if (pedido === '1') await estado(env, 'pedir_rodada', '0');
   if (pedido === '1' || rodadaCheia) await rodarRobo(env);
+  else await rodarDetalhes(env, new Orcamento(10), [], 8, true); // adianta a leitura dos concursos que ainda não têm cargos
   return n;
 }
 
@@ -640,6 +727,7 @@ input,select{width:100%;padding:11px 12px;border:1px solid var(--linha);border-r
 .card .meio{flex:1;min-width:0}
 .card h3{margin:0 0 4px;font-size:15px;line-height:1.3;word-wrap:break-word}
 .card h3 a{color:inherit;text-decoration:none}
+.cargos{font-size:13px;color:var(--suave);margin-top:6px}.cargos b{color:var(--tinta);background:#fbefd9;padding:0 3px;border-radius:4px}
 .meta{display:flex;gap:6px;flex-wrap:wrap;font-size:12px;color:var(--suave)}
 .tag{background:#eef3f2;color:var(--verde2);padding:2px 8px;border-radius:6px;font-weight:600}
 .tag.aberta{background:#fbefd9;color:#8a5a0b}
@@ -666,18 +754,18 @@ input,select{width:100%;padding:11px 12px;border:1px solid var(--linha);border-r
 <main>
 <section id="aba-concursos">
   <div class="filtros">
-    <input id="fBusca" placeholder="Buscar: TRT, polícia, SEFAZ..." autocomplete="off">
+    <input id="fBusca" placeholder="Cargo ou órgão: psicólogo, TRT, polícia..." autocomplete="off">
     <select id="fBanca"><option value="">Todas as bancas</option></select>
     <select id="fUF"><option value="">Todos os estados</option></select>
     <select id="fSit"><option value="">Qualquer situação</option><option value="abertas">Inscrições abertas</option><option value="novo">Novos / edital em breve</option><option value="andamento">Em andamento</option></select>
   </div>
-  <div class="chips"><span class="chip" data-so="acomp">⭐ Só os que acompanho</span></div>
+  <div class="chips"><span class="chip" data-so="acomp">⭐ Só os que acompanho</span><span class="chip" data-area="psicólogo">Psicologia</span><span class="chip" data-area="enferm">Enfermagem</span><span class="chip" data-area="médico">Medicina</span><span class="chip" data-area="direito">Direito</span><span class="chip" data-area="tecnologia da informação">TI</span><span class="chip" data-area="contabilidade">Contabilidade</span><span class="chip" data-area="engenharia">Engenharia</span><span class="chip" data-area="professor">Educação</span><span class="chip" data-area="polícia">Polícia</span><span class="chip" data-area="administrativa">Administrativo</span></div>
   <div class="lista" id="lista"><div class="vazio">Carregando concursos…</div></div>
 </section>
 <section id="aba-alertas" hidden>
   <div class="bloco" id="blocoTg"></div>
-  <div class="bloco"><h2>Vigiar no Diário Oficial</h2>
-    <p>Coloque seu nome completo, um cargo ou um órgão. Se aparecer no Diário Oficial da União, o aviso aparece aqui em Meus avisos.</p>
+  <div class="bloco"><h2>Vigiar nome, cargo ou órgão</h2>
+    <p>Coloque seu nome completo, um cargo (ex.: psicólogo) ou um órgão. Você é avisado quando aparecer no Diário Oficial da União ou entre os cargos de um concurso das bancas.</p>
     <form class="linha" id="formTermo"><input id="novoTermo" placeholder="Ex.: Maria da Silva Souza" maxlength="120"><button class="btn">Adicionar</button></form>
     <div id="termos"></div></div>
   <div class="bloco"><h2>Concursos que acompanho</h2><p>Quando sair edital, retificação, gabarito ou resultado novo na página da banca, o aviso aparece aqui.</p><div id="acomp"></div></div>
@@ -702,17 +790,28 @@ const quando=iso=>{if(!iso)return'';const d=new Date(iso.includes('T')?iso:iso.r
 
 document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{document.querySelectorAll('nav button').forEach(x=>x.classList.toggle('ativo',x===b));document.querySelectorAll('main section').forEach(s=>s.hidden=s.id!=='aba-'+b.dataset.aba);if(b.dataset.aba==='alertas')carregarMe();if(b.dataset.aba==='novidades')carregarNovidades()});
 
-async function carregarConcursos(){try{todos=await chamar('/api/concursos')}catch(e){$('#lista').innerHTML='<div class="vazio">Não consegui carregar agora.</div>';return}
-  const bancas=[...new Set(todos.map(c=>c.banca))].sort(),ufs=[...new Set(todos.map(c=>c.uf).filter(Boolean))].sort();
+const semAcento=t=>String(t||'').normalize('NFD').replace(/[\\u0300-\\u036f]/g,'').toLowerCase();
+function raizes(q){return semAcento(q).split(/[^a-z0-9]+/).filter(w=>w.length>=2).map(w=>{if(w.length>4&&w.endsWith('s'))w=w.slice(0,-1);if(w.length>6&&w.endsWith('ia'))w=w.slice(0,-2);else if(w.length>5&&/[aeo]$/.test(w))w=w.slice(0,-1);return w}).slice(0,5)}
+let primeira=true,pedido=0;
+async function carregarConcursos(){const q=$('#fBusca').value.trim(),meu=++pedido;let l;try{l=await chamar('/api/concursos'+(q?'?q='+encodeURIComponent(q):''))}catch(e){$('#lista').innerHTML='<div class="vazio">Não consegui carregar agora.</div>';return}
+  if(meu!==pedido)return;todos=l;
+  if(primeira&&!q){primeira=false;const bancas=[...new Set(todos.map(c=>c.banca))].sort(),ufs=[...new Set(todos.map(c=>c.uf).filter(Boolean))].sort();
   $('#fBanca').innerHTML='<option value="">Todas as bancas</option>'+bancas.map(b=>'<option>'+esc(b)+'</option>').join('');
-  $('#fUF').innerHTML='<option value="">Todos os estados</option>'+ufs.map(u=>'<option value="'+u+'">'+esc(UFN[u]||u)+'</option>').join('');
+  $('#fUF').innerHTML='<option value="">Todos os estados</option>'+ufs.map(u=>'<option value="'+u+'">'+esc(UFN[u]||u)+'</option>').join('')}
   desenhar()}
-function desenhar(){const q=$('#fBusca').value.trim().toLowerCase().normalize('NFD').replace(/[\\u0300-\\u036f]/g,''),b=$('#fBanca').value,u=$('#fUF').value,s=$('#fSit').value;
-  const l=todos.filter(c=>(!q||c.nome.toLowerCase().normalize('NFD').replace(/[\\u0300-\\u036f]/g,'').includes(q))&&(!b||c.banca===b)&&(!u||c.uf===u)&&(!s||c.situacao===s)&&(!soAcomp||c.acompanhando));
-  if(!todos.length){$('#lista').innerHTML='<div class="vazio">O robô ainda não rodou. Os concursos aparecem aqui depois da primeira leitura das bancas.</div>';return}
-  if(!l.length){$('#lista').innerHTML='<div class="vazio">Nenhum concurso com esses filtros.</div>';return}
-  $('#lista').innerHTML=l.map(c=>'<div class="card"><div class="meio"><h3><a href="'+esc(c.url)+'" target="_blank" rel="noopener">'+esc(c.nome)+'</a></h3><div class="meta"><span class="tag">'+esc(c.banca)+'</span>'+(c.situacao==='abertas'?'<span class="tag aberta">Inscrições abertas</span>':c.situacao==='novo'?'<span class="tag aberta">Novo</span>':'')+(c.uf?'<span>'+esc(c.uf)+'</span>':'')+(c.vagas?'<span>'+esc(c.vagas)+' vagas</span>':'')+(c.salario?'<span><b>até '+esc(c.salario)+'</b></span>':'')+'<span>visto '+quando(c.primeiro_visto)+'</span></div></div><button class="estrela'+(c.acompanhando?' on':'')+'" data-id="'+esc(c.id)+'">'+(c.acompanhando?'★ Acompanhando':'☆ Acompanhar')+'</button></div>').join('')}
-['#fBusca','#fBanca','#fUF','#fSit'].forEach(s=>$(s).addEventListener('input',desenhar));
+function linhaCargos(c,rz){let cg=[];try{cg=JSON.parse(c.cargos||'[]')}catch(e){}
+  if(rz.length){const bate=cg.filter(x=>{const n=semAcento(x);return rz.every(w=>n.includes(w))});
+    if(bate.length)return '<div class="cargos">Cargos: '+bate.slice(0,4).map(x=>'<b>'+esc(x)+'</b>').join(' · ')+(bate.length>4?' e mais '+(bate.length-4):'')+'</div>';
+    if(!rz.every(w=>semAcento(c.nome).includes(w)))return '<div class="cargos">✓ Citado na página do concurso</div>'}
+  if(!cg.length)return '';return '<div class="cargos">Cargos: '+cg.slice(0,3).map(esc).join(' · ')+(cg.length>3?' e mais '+(cg.length-3):'')+'</div>'}
+function desenhar(){const q=$('#fBusca').value.trim(),rz=raizes(q),b=$('#fBanca').value,u=$('#fUF').value,s=$('#fSit').value;
+  const l=todos.filter(c=>(!b||c.banca===b)&&(!u||c.uf===u)&&(!s||c.situacao===s)&&(!soAcomp||c.acompanhando));
+  if(!todos.length&&!q){$('#lista').innerHTML='<div class="vazio">O robô ainda não rodou. Os concursos aparecem aqui depois da primeira leitura das bancas.</div>';return}
+  if(!l.length){$('#lista').innerHTML='<div class="vazio">Nenhum concurso encontrado'+(q?' para "'+esc(q)+'". Você pode cadastrar esse termo em Meus alertas para ser avisado quando aparecer.':' com esses filtros.')+'</div>';return}
+  $('#lista').innerHTML=l.map(c=>'<div class="card"><div class="meio"><h3><a href="'+esc(c.url)+'" target="_blank" rel="noopener">'+esc(c.nome)+'</a></h3><div class="meta"><span class="tag">'+esc(c.banca)+'</span>'+(c.situacao==='abertas'?'<span class="tag aberta">Inscrições abertas</span>':c.situacao==='novo'?'<span class="tag aberta">Novo</span>':'')+(c.uf?'<span>'+esc(c.uf)+'</span>':'')+(c.vagas?'<span>'+esc(c.vagas)+' vagas</span>':'')+(c.salario?'<span><b>até '+esc(c.salario)+'</b></span>':'')+(c.inscricoes?'<span>Inscrições: '+esc(c.inscricoes.replace(/^De /,''))+'</span>':'')+'</div>'+linhaCargos(c,rz)+'</div><button class="estrela'+(c.acompanhando?' on':'')+'" data-id="'+esc(c.id)+'">'+(c.acompanhando?'★ Acompanhando':'☆ Acompanhar')+'</button></div>').join('')}
+let espera;$('#fBusca').addEventListener('input',()=>{clearTimeout(espera);espera=setTimeout(carregarConcursos,350)});
+document.querySelectorAll('[data-area]').forEach(ch=>ch.onclick=()=>{const on=ch.classList.contains('ativo');document.querySelectorAll('[data-area]').forEach(x=>x.classList.remove('ativo'));$('#fBusca').value=on?'':ch.dataset.area;if(!on)ch.classList.add('ativo');carregarConcursos()});
+['#fBanca','#fUF','#fSit'].forEach(s=>$(s).addEventListener('input',desenhar));
 document.querySelector('[data-so]').onclick=e=>{soAcomp=!soAcomp;e.target.classList.toggle('ativo',soAcomp);desenhar()};
 $('#lista').onclick=async e=>{const b=e.target.closest('.estrela');if(!b)return;const c=todos.find(x=>x.id===b.dataset.id);try{await garantirUsuario();await chamar('/api/acompanhar',{method:'POST',body:JSON.stringify({concurso_id:c.id,ativo:!c.acompanhando})});c.acompanhando=c.acompanhando?0:1;desenhar();toast(c.acompanhando?'Novidades desse concurso vão aparecer em Meus alertas':'Parou de acompanhar')}catch(err){toast(err.message)}};
 
