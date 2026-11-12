@@ -799,6 +799,9 @@ async function carregarConcursos(){const q=$('#fBusca').value.trim(),meu=++pedid
   $('#fBanca').innerHTML='<option value="">Todas as bancas</option>'+bancas.map(b=>'<option>'+esc(b)+'</option>').join('');
   $('#fUF').innerHTML='<option value="">Todos os estados</option>'+ufs.map(u=>'<option value="'+u+'">'+esc(UFN[u]||u)+'</option>').join('')}
   desenhar()}
+function insc(c){if(!c.inscricoes)return '';const t=c.inscricoes.replace(/^De /,''),ds=t.match(/\\d{2}\\/\\d{2}\\/\\d{4}/g);
+  if(ds){const p=ds[ds.length-1].split('/'),fim=new Date(+p[2],+p[1]-1,+p[0],23,59);if(fim<new Date())return '<span>Inscrições encerradas em '+ds[ds.length-1]+'</span>';return '<span class="tag aberta">Inscrições até '+ds[ds.length-1]+'</span>'}
+  return '<span>Inscrições: '+esc(t)+'</span>'}
 function linhaCargos(c,rz){let cg=[];try{cg=JSON.parse(c.cargos||'[]')}catch(e){}
   if(rz.length){const bate=cg.filter(x=>{const n=semAcento(x);return rz.every(w=>n.includes(w))});
     if(bate.length)return '<div class="cargos">Cargos: '+bate.slice(0,4).map(x=>'<b>'+esc(x)+'</b>').join(' · ')+(bate.length>4?' e mais '+(bate.length-4):'')+'</div>';
@@ -808,7 +811,7 @@ function desenhar(){const q=$('#fBusca').value.trim(),rz=raizes(q),b=$('#fBanca'
   const l=todos.filter(c=>(!b||c.banca===b)&&(!u||c.uf===u)&&(!s||c.situacao===s)&&(!soAcomp||c.acompanhando));
   if(!todos.length&&!q){$('#lista').innerHTML='<div class="vazio">O robô ainda não rodou. Os concursos aparecem aqui depois da primeira leitura das bancas.</div>';return}
   if(!l.length){$('#lista').innerHTML='<div class="vazio">Nenhum concurso encontrado'+(q?' para "'+esc(q)+'". Você pode cadastrar esse termo em Meus alertas para ser avisado quando aparecer.':' com esses filtros.')+'</div>';return}
-  $('#lista').innerHTML=l.map(c=>'<div class="card"><div class="meio"><h3><a href="'+esc(c.url)+'" target="_blank" rel="noopener">'+esc(c.nome)+'</a></h3><div class="meta"><span class="tag">'+esc(c.banca)+'</span>'+(c.situacao==='abertas'?'<span class="tag aberta">Inscrições abertas</span>':c.situacao==='novo'?'<span class="tag aberta">Novo</span>':'')+(c.uf?'<span>'+esc(c.uf)+'</span>':'')+(c.vagas?'<span>'+esc(c.vagas)+' vagas</span>':'')+(c.salario?'<span><b>até '+esc(c.salario)+'</b></span>':'')+(c.inscricoes?'<span>Inscrições: '+esc(c.inscricoes.replace(/^De /,''))+'</span>':'')+'</div>'+linhaCargos(c,rz)+'</div><button class="estrela'+(c.acompanhando?' on':'')+'" data-id="'+esc(c.id)+'">'+(c.acompanhando?'★ Acompanhando':'☆ Acompanhar')+'</button></div>').join('')}
+  $('#lista').innerHTML=l.map(c=>'<div class="card"><div class="meio"><h3><a href="'+esc(c.url)+'" target="_blank" rel="noopener">'+esc(c.nome)+'</a></h3><div class="meta"><span class="tag">'+esc(c.banca)+'</span>'+(c.situacao==='abertas'?'<span class="tag aberta">Inscrições abertas</span>':c.situacao==='novo'?'<span class="tag aberta">Novo</span>':'')+(c.uf?'<span>'+esc(c.uf)+'</span>':'')+(c.vagas?'<span>'+esc(c.vagas)+' vagas</span>':'')+(c.salario?'<span><b>até '+esc(c.salario)+'</b></span>':'')+insc(c)+'</div>'+linhaCargos(c,rz)+'</div><button class="estrela'+(c.acompanhando?' on':'')+'" data-id="'+esc(c.id)+'">'+(c.acompanhando?'★ Acompanhando':'☆ Acompanhar')+'</button></div>').join('')}
 let espera;$('#fBusca').addEventListener('input',()=>{clearTimeout(espera);espera=setTimeout(carregarConcursos,350)});
 document.querySelectorAll('[data-area]').forEach(ch=>ch.onclick=()=>{const on=ch.classList.contains('ativo');document.querySelectorAll('[data-area]').forEach(x=>x.classList.remove('ativo'));$('#fBusca').value=on?'':ch.dataset.area;if(!on)ch.classList.add('ativo');carregarConcursos()});
 ['#fBanca','#fUF','#fSit'].forEach(s=>$(s).addEventListener('input',desenhar));
