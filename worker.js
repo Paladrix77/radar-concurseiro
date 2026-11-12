@@ -194,7 +194,7 @@ async function espiar(env, orc, id, base, html) {
   try {
     if (orc.n < 8) return;
     const pegar = (re, txt, max) => { const out = []; let m; while ((m = re.exec(txt)) && out.length < max) if (!out.includes(m[1])) out.push(m[1]); return out; };
-    const scripts = pegar(/<script[^>]*\bsrc=["']([^"']+)["']/gi, html, 30).map((u) => { try { return new URL(u, base).href; } catch { return null; } }).filter(Boolean);
+    const scripts = pegar(/<script[^>]*\bsrc=["']([^"']+)["']/gi, html, 120).map((u) => { try { return new URL(u, base).href; } catch { return null; } }).filter(Boolean);
     const ids = pegar(/<script[^>]*\bid=["']([^"']+)["']/gi, html, 30);
     const trechos = [];
     for (const k of ['jsonArray', 'urlTitle', '/api/', 'api.', '.json', 'ajax', 'fetch(', 'resultado']) {
@@ -202,16 +202,20 @@ async function espiar(env, orc, id, base, html) {
       while (i >= 0 && n < 2) { trechos.push(k + ' => ' + html.slice(Math.max(0, i - 200), i + 300)); i = html.indexOf(k, i + 1); n++; }
     }
     const host = new URL(base).host;
-    const daMesmaCasa = scripts.filter((u) => new URL(u).host === host || /cebraspe|in\.gov/.test(u));
+    const enfeite = /jquery|layerslider|revslider|gtag|googletag|wp-a11y|qode|plugins|greensock|analytics|recaptcha/i;
+    const daMesmaCasa = scripts.filter((u) => (new URL(u).host === host || /cebraspe|in\.gov/.test(u)) && !enfeite.test(u))
+      .sort((a, b) => (/static\/js|main|bundle|app|chunk|runtime/i.test(b) ? 1 : 0) - (/static\/js|main|bundle|app|chunk|runtime/i.test(a) ? 1 : 0));
     const apis = [];
-    for (const u of daMesmaCasa.slice(-5)) {
+    // scripts inline com configuração
+    for (const x of pegar(/<script(?![^>]*src)[^>]*>([\s\S]{20,4000}?)<\/script>/gi, html, 20)) if (/api|url|endpoint|config/i.test(x) && !/gtag|uiAutocomplete/.test(x)) trechos.push('inline => ' + x.slice(0, 600));
+    for (const u of daMesmaCasa.slice(0, 5)) {
       if (orc.n < 5) break;
       const r = await orc.fetch(u);
       const js = await r.text();
       for (const x of pegar(/["'`](https?:\/\/[^"'`\s]{6,200})["'`]/g, js, 80)) if (/api|json|servic|concurso|busca/i.test(x)) apis.push(x);
       for (const x of pegar(/["'`](\/?[a-zA-Z0-9_\-\/]*(?:api|Api|json|servic|concurso|Concurso)[a-zA-Z0-9_\-\/{}.?=&]*)["'`]/g, js, 120)) apis.push(x);
     }
-    const amostra = { base, scripts, ids, trechos: trechos.slice(0, 12), apis: [...new Set(apis)].slice(0, 150) };
+    const amostra = { base, scripts: daMesmaCasa, ids, trechos: trechos.slice(0, 16), apis: [...new Set(apis)].slice(0, 150) };
     await env.DB.prepare('INSERT INTO fontes_log(fonte,quando,links,amostra) VALUES(?,?,0,?) ON CONFLICT(fonte) DO UPDATE SET quando=excluded.quando, amostra=excluded.amostra')
       .bind('espiar:' + id, agora(), JSON.stringify(amostra)).run();
   } catch (e) {
