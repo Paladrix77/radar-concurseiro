@@ -98,6 +98,20 @@ export function lerFonte(fonte, html) {
 // Lê respostas JSON de API (formato descoberto em tempo de execução: procura os campos mais prováveis)
 export function lerFonteJSON(fonte, texto) {
   let dados = JSON.parse(texto);
+  // Formato da Cebraspe: [{ faseEvento, eventos: [{ eventoNomeAbreviado, eventoURL, eventoTotalVagas, strEventoSalarioMaximo, eventoStatus }] }]
+  if (Array.isArray(dados) && dados.some((g) => g && Array.isArray(g.eventos))) {
+    const out = [];
+    for (const g of dados) for (const e of g.eventos || []) {
+      if (!e || !e.eventoURL) continue;
+      const slug = String(e.eventoURL).trim();
+      const nome = tirarTags(e.eventoNomeCompleto || e.eventoNomeAbreviado || bonitoDoSlug(slug));
+      const sal = e.eventoSalarioMaximo > 0 ? e.strEventoSalarioMaximo : null;
+      out.push({ id: `${fonte.banca.toLowerCase()}:${slug.toLowerCase()}`, banca: fonte.banca, url: fonte.linkBase + slug.toLowerCase(), nome,
+        uf: detectarUF(slug, nome), situacao: e.eventoStatus === 'inscricoes-abertas' ? 'abertas' : e.eventoStatus === 'novos' ? 'novo' : 'andamento',
+        vagas: e.eventoTotalVagas || null, salario: sal });
+    }
+    return out;
+  }
   if (!Array.isArray(dados)) dados = dados.data || dados.eventos || dados.itens || dados.items || dados.result || dados.value || Object.values(dados).find(Array.isArray) || [];
   const pegarCampo = (o, nomes) => { for (const n of nomes) for (const k of Object.keys(o)) if (k.toLowerCase() === n && o[k] != null && o[k] !== '') return o[k]; return null; };
   const out = [];
@@ -271,7 +285,8 @@ async function rodarFontes(env, orc, log) {
       if (!lista.length && fonte.tipo !== 'json') await espiar(env, orc, fonte.id, r.url, html);
       for (const c of lista) {
         const ja = vistosAgora.get(c.id);
-        if (!ja || c.situacao === 'abertas') vistosAgora.set(c.id, { ...(ja || {}), ...c, nome: ja && ja.nome.length > c.nome.length ? ja.nome : c.nome });
+        const peso = { abertas: 3, novo: 2, andamento: 1 };
+        if (!ja || (peso[c.situacao] || 0) > (peso[ja.situacao] || 0)) vistosAgora.set(c.id, { ...(ja || {}), ...c, vagas: c.vagas || ja?.vagas, salario: c.salario || ja?.salario, nome: ja && ja.nome.length > c.nome.length ? ja.nome : c.nome });
       }
       await env.DB.prepare('INSERT INTO fontes_log(fonte,quando,links,erro) VALUES(?,?,?,NULL) ON CONFLICT(fonte) DO UPDATE SET quando=excluded.quando,links=excluded.links,erro=NULL')
         .bind(fonte.id, agora(), lista.length).run();
@@ -288,12 +303,12 @@ async function rodarFontes(env, orc, log) {
   for (const c of vistosAgora.values()) {
     const ex = await env.DB.prepare('SELECT id, situacao FROM concursos WHERE id=?').bind(c.id).first();
     if (!ex) {
-      await env.DB.prepare('INSERT INTO concursos(id,banca,nome,url,situacao,uf,primeiro_visto,ultimo_visto) VALUES(?,?,?,?,?,?,?,?)')
-        .bind(c.id, c.banca, c.nome, c.url, c.situacao, c.uf, t, t).run();
+      await env.DB.prepare('INSERT INTO concursos(id,banca,nome,url,situacao,uf,primeiro_visto,ultimo_visto,vagas,salario) VALUES(?,?,?,?,?,?,?,?,?,?)')
+        .bind(c.id, c.banca, c.nome, c.url, c.situacao, c.uf, t, t, c.vagas || null, c.salario || null).run();
       novos.push(c);
     } else {
-      await env.DB.prepare('UPDATE concursos SET nome=?, situacao=?, uf=COALESCE(?,uf), ultimo_visto=? WHERE id=?')
-        .bind(c.nome, c.situacao, c.uf, t, c.id).run();
+      await env.DB.prepare('UPDATE concursos SET nome=?, situacao=?, uf=COALESCE(?,uf), ultimo_visto=?, vagas=COALESCE(?,vagas), salario=COALESCE(?,salario) WHERE id=?')
+        .bind(c.nome, c.situacao, c.uf, t, c.vagas || null, c.salario || null, c.id).run();
       if (ex.situacao !== 'abertas' && c.situacao === 'abertas') {
         await avisarConcurso(env, c.id, `📝 Inscrições abertas: <b>${escHtml(c.nome)}</b> (${c.banca})`, c.url, 'inscricoes', orc);
       }
@@ -430,10 +445,10 @@ async function api(req, env, url) {
     if (banca) { where.push('c.banca = ?'); args.push(banca); }
     if (sit) { where.push('c.situacao = ?'); args.push(sit); }
     if (uf) { where.push('c.uf = ?'); args.push(uf); }
-    const r = await env.DB.prepare(`SELECT c.id,c.banca,c.nome,c.url,c.situacao,c.uf,c.primeiro_visto,
+    const r = await env.DB.prepare(`SELECT c.id,c.banca,c.nome,c.url,c.situacao,c.uf,c.primeiro_visto,c.vagas,c.salario,
       EXISTS(SELECT 1 FROM acompanhando a WHERE a.token=? AND a.concurso_id=c.id) AS acompanhando
       FROM concursos c WHERE ${where.join(' AND ')}
-      ORDER BY (c.situacao='abertas') DESC, c.primeiro_visto DESC LIMIT 400`).bind(...args).all();
+      ORDER BY (c.situacao='abertas') DESC, (c.situacao='novo') DESC, c.primeiro_visto DESC LIMIT 400`).bind(...args).all();
     return json(r.results);
   }
 
@@ -609,7 +624,7 @@ input,select{width:100%;padding:11px 12px;border:1px solid var(--linha);border-r
     <input id="fBusca" placeholder="Buscar: TRT, polícia, SEFAZ..." autocomplete="off">
     <select id="fBanca"><option value="">Todas as bancas</option></select>
     <select id="fUF"><option value="">Todos os estados</option></select>
-    <select id="fSit"><option value="">Qualquer situação</option><option value="abertas">Inscrições abertas</option><option value="andamento">Em andamento</option></select>
+    <select id="fSit"><option value="">Qualquer situação</option><option value="abertas">Inscrições abertas</option><option value="novo">Novos / edital em breve</option><option value="andamento">Em andamento</option></select>
   </div>
   <div class="chips"><span class="chip" data-so="acomp">⭐ Só os que acompanho</span></div>
   <div class="lista" id="lista"><div class="vazio">Carregando concursos…</div></div>
@@ -651,7 +666,7 @@ function desenhar(){const q=$('#fBusca').value.trim().toLowerCase().normalize('N
   const l=todos.filter(c=>(!q||c.nome.toLowerCase().normalize('NFD').replace(/[\\u0300-\\u036f]/g,'').includes(q))&&(!b||c.banca===b)&&(!u||c.uf===u)&&(!s||c.situacao===s)&&(!soAcomp||c.acompanhando));
   if(!todos.length){$('#lista').innerHTML='<div class="vazio">O robô ainda não rodou. Os concursos aparecem aqui depois da primeira leitura das bancas.</div>';return}
   if(!l.length){$('#lista').innerHTML='<div class="vazio">Nenhum concurso com esses filtros.</div>';return}
-  $('#lista').innerHTML=l.map(c=>'<div class="card"><div class="meio"><h3><a href="'+esc(c.url)+'" target="_blank" rel="noopener">'+esc(c.nome)+'</a></h3><div class="meta"><span class="tag">'+esc(c.banca)+'</span>'+(c.situacao==='abertas'?'<span class="tag aberta">Inscrições abertas</span>':'')+(c.uf?'<span>'+esc(c.uf)+'</span>':'')+'<span>visto '+quando(c.primeiro_visto)+'</span></div></div><button class="estrela'+(c.acompanhando?' on':'')+'" data-id="'+esc(c.id)+'">'+(c.acompanhando?'★ Acompanhando':'☆ Acompanhar')+'</button></div>').join('')}
+  $('#lista').innerHTML=l.map(c=>'<div class="card"><div class="meio"><h3><a href="'+esc(c.url)+'" target="_blank" rel="noopener">'+esc(c.nome)+'</a></h3><div class="meta"><span class="tag">'+esc(c.banca)+'</span>'+(c.situacao==='abertas'?'<span class="tag aberta">Inscrições abertas</span>':c.situacao==='novo'?'<span class="tag aberta">Novo</span>':'')+(c.uf?'<span>'+esc(c.uf)+'</span>':'')+(c.vagas?'<span>'+esc(c.vagas)+' vagas</span>':'')+(c.salario?'<span><b>até '+esc(c.salario)+'</b></span>':'')+'<span>visto '+quando(c.primeiro_visto)+'</span></div></div><button class="estrela'+(c.acompanhando?' on':'')+'" data-id="'+esc(c.id)+'">'+(c.acompanhando?'★ Acompanhando':'☆ Acompanhar')+'</button></div>').join('')}
 ['#fBusca','#fBanca','#fUF','#fSit'].forEach(s=>$(s).addEventListener('input',desenhar));
 document.querySelector('[data-so]').onclick=e=>{soAcomp=!soAcomp;e.target.classList.toggle('ativo',soAcomp);desenhar()};
 $('#lista').onclick=async e=>{const b=e.target.closest('.estrela');if(!b)return;const c=todos.find(x=>x.id===b.dataset.id);try{await garantirUsuario();await chamar('/api/acompanhar',{method:'POST',body:JSON.stringify({concurso_id:c.id,ativo:!c.acompanhando})});c.acompanhando=c.acompanhando?0:1;desenhar();toast(c.acompanhando?'Novidades desse concurso vão aparecer em Meus alertas':'Parou de acompanhar')}catch(err){toast(err.message)}};
