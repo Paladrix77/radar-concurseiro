@@ -214,8 +214,19 @@ async function espiar(env, orc, id, base, html) {
       const js = await r.text();
       for (const x of pegar(/["'`](https?:\/\/[^"'`\s]{6,200})["'`]/g, js, 80)) if (/api|json|servic|concurso|busca/i.test(x)) apis.push(x);
       for (const x of pegar(/["'`](\/?[a-zA-Z0-9_\-\/]*(?:api|Api|json|servic|concurso|Concurso)[a-zA-Z0-9_\-\/{}.?=&]*)["'`]/g, js, 120)) apis.push(x);
+      for (const k of ['apis.', 'eventos', 'axios', 'fetch(']) {
+        let i = js.indexOf(k), n = 0;
+        while (i >= 0 && n < 4) { trechos.push('js ' + k + ' => ' + js.slice(Math.max(0, i - 250), i + 450)); i = js.indexOf(k, i + 1); n++; }
+      }
     }
-    const amostra = { base, scripts: daMesmaCasa, ids, trechos: trechos.slice(0, 16), apis: [...new Set(apis)].slice(0, 150) };
+    // chama as APIs encontradas e guarda o começo da resposta
+    const respostas = [];
+    for (const u of [...new Set(apis)].filter((x) => /^https:\/\/apis?\./.test(x)).slice(0, 4)) {
+      if (orc.n < 3) break;
+      try { const r = await orc.fetch(u, { headers: { accept: 'application/json, text/plain, */*' } }); respostas.push({ u, status: r.status, ct: r.headers.get('content-type'), corpo: (await r.text()).slice(0, 3000) }); }
+      catch (e) { respostas.push({ u, erro: String(e.message || e) }); }
+    }
+    const amostra = { base, scripts: daMesmaCasa, ids, respostas, trechos: trechos.filter((t) => t.startsWith('js ')).slice(0, 16), apis: [...new Set(apis)].slice(0, 150) };
     await env.DB.prepare('INSERT INTO fontes_log(fonte,quando,links,amostra) VALUES(?,?,0,?) ON CONFLICT(fonte) DO UPDATE SET quando=excluded.quando, amostra=excluded.amostra')
       .bind('espiar:' + id, agora(), JSON.stringify(amostra)).run();
   } catch (e) {
