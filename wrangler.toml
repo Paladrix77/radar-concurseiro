@@ -3,7 +3,7 @@ main = "worker.js"
 compatibility_date = "2026-11-01"
 
 [triggers]
-crons = ["7 * * * *"]
+crons = ["* * * * *"]  # a rodada completa só acontece no minuto 7; nos outros só atende sondas
 
 [vars]
 # BOT_USERNAME = "nome_do_bot"  (Telegram desativado por enquanto)

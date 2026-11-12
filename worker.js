@@ -411,6 +411,42 @@ async function rodarDOU(env, orc, log, forcar = false) {
   }
 }
 
+// ---------- Sondas: pedidos de investigação gravados no banco (tabela sondas) ----------
+function resumirSonda(txt, modo, base) {
+  modo = modo || 'bruto:0';
+  if (modo === 'links') {
+    const out = [];
+    for (const { url, texto } of extrairLinks(txt, base)) { const k = url.pathname + url.search + ' | ' + texto.slice(0, 90); if (!out.includes(k)) out.push(k); if (out.length >= 300) break; }
+    return out.join('\n');
+  }
+  if (modo.startsWith('busca:')) {
+    const re = new RegExp(modo.slice(6), 'gi'); const out = []; let m;
+    while ((m = re.exec(txt)) && out.length < 10) { out.push(txt.slice(Math.max(0, m.index - 300), m.index + 600)); re.lastIndex = m.index + 600; }
+    return `(${txt.length} chars)\n` + out.join('\n-----\n');
+  }
+  if (modo.startsWith('texto:')) {
+    const limpo = tirarTags(txt.replace(/<(script|style)[\s\S]*?<\/\1>/gi, ' '));
+    const o = Number(modo.slice(6)) || 0; return `(${limpo.length} chars)\n` + limpo.slice(o, o + 6000);
+  }
+  const o = Number(modo.split(':')[1]) || 0;
+  return `(${txt.length} chars)\n` + txt.slice(o, o + 6000);
+}
+async function rodarSondas(env, orc) {
+  let r;
+  try { r = await env.DB.prepare('SELECT * FROM sondas WHERE feito IS NULL ORDER BY id LIMIT 8').all(); } catch { return 0; }
+  for (const sd of r.results) {
+    let status = 0, ct = '', corpo = '';
+    try {
+      const api = /\/\/apis?\./.test(sd.url);
+      const resp = await orc.fetch(sd.url, { headers: api ? { accept: 'application/json, text/plain, */*', referer: 'https://www.cebraspe.org.br/concursos/', origin: 'https://www.cebraspe.org.br' } : {} });
+      status = resp.status; ct = resp.headers.get('content-type') || '';
+      corpo = resumirSonda(await lerTexto(resp), sd.modo, resp.url);
+    } catch (e) { corpo = 'ERRO ' + (e.message || e); }
+    await env.DB.prepare('UPDATE sondas SET feito=?, status=?, ct=?, corpo=? WHERE id=?').bind(agora(), status, ct, corpo, sd.id).run();
+  }
+  return r.results.length;
+}
+
 export async function rodarRobo(env, { forcarDOU = false } = {}) {
   const orc = new Orcamento(Number(env.LIMITE_REQUISICOES || 48));
   const log = [];
@@ -559,7 +595,12 @@ export default {
     }
   },
   async scheduled(evento, env, ctx) {
-    ctx.waitUntil(rodarRobo(env));
+    ctx.waitUntil((async () => {
+      await rodarSondas(env, new Orcamento(20));
+      const pedido = await estado(env, 'pedir_rodada');
+      if (pedido === '1') await estado(env, 'pedir_rodada', '0');
+      if (pedido === '1' || new Date(evento.scheduledTime).getUTCMinutes() === 7) await rodarRobo(env);
+    })());
   },
 };
 

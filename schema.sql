@@ -55,3 +55,4 @@ CREATE TABLE IF NOT EXISTS fontes_log (
   erro TEXT,
   amostra TEXT
 );
+CREATE TABLE IF NOT EXISTS sondas (id INTEGER PRIMARY KEY AUTOINCREMENT, url TEXT NOT NULL, modo TEXT, feito TEXT, status INTEGER, ct TEXT, corpo TEXT);
