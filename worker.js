@@ -6,11 +6,7 @@
 // Se uma banca mudar o site, é só ajustar aqui. O painel /api/fontes mostra quantos links cada uma achou.
 export const FONTES = [
   // A Cebraspe monta a página com JavaScript; os dados vêm desta API
-  { id: 'cebraspe-abertas', banca: 'Cebraspe', tipo: 'json', situacao: 'abertas',
-    url: 'https://apis.cebraspe.org.br/cebraspe/eventos/tipo/concursos/fase/inscricoes-abertas', linkBase: 'https://www.cebraspe.org.br/concursos/' },
-  { id: 'cebraspe-andamento', banca: 'Cebraspe', tipo: 'json', situacao: 'andamento',
-    url: 'https://apis.cebraspe.org.br/cebraspe/eventos/tipo/concursos/fase/em-andamento', linkBase: 'https://www.cebraspe.org.br/concursos/' },
-  { id: 'cebraspe-novos', banca: 'Cebraspe', tipo: 'json', situacao: 'andamento',
+  { id: 'cebraspe', banca: 'Cebraspe', tipo: 'json', situacao: 'andamento',
     url: 'https://apis.cebraspe.org.br/cebraspe/eventos/tipo/concursos/', linkBase: 'https://www.cebraspe.org.br/concursos/' },
   { id: 'fgv', banca: 'FGV', url: 'https://conhecimento.fgv.br/concursos', situacao: 'andamento',
     padrao: /^\/concursos\/([a-z0-9-]+)\/?$/i, ignorar: ['abertos', 'andamento', 'encerrados'] },
@@ -103,6 +99,7 @@ export function lerFonteJSON(fonte, texto) {
     const out = [];
     for (const g of dados) for (const e of g.eventos || []) {
       if (!e || !e.eventoURL) continue;
+      if (!['novos', 'inscricoes-abertas', 'em-andamento'].includes(e.eventoStatus)) continue; // pula encerrados
       const slug = String(e.eventoURL).trim();
       const nome = tirarTags(e.eventoNomeCompleto || e.eventoNomeAbreviado || bonitoDoSlug(slug));
       const sal = e.eventoSalarioMaximo > 0 ? e.strEventoSalarioMaximo : null;
@@ -299,28 +296,30 @@ async function rodarFontes(env, orc, log) {
   }
 
   const novos = [];
+  const abriram = [];
   const t = agora();
+  const existentes = new Map((await env.DB.prepare('SELECT id, situacao FROM concursos').all()).results.map((x) => [x.id, x.situacao]));
+  const lote = [];
   for (const c of vistosAgora.values()) {
-    const ex = await env.DB.prepare('SELECT id, situacao FROM concursos WHERE id=?').bind(c.id).first();
-    if (!ex) {
-      await env.DB.prepare('INSERT INTO concursos(id,banca,nome,url,situacao,uf,primeiro_visto,ultimo_visto,vagas,salario) VALUES(?,?,?,?,?,?,?,?,?,?)')
-        .bind(c.id, c.banca, c.nome, c.url, c.situacao, c.uf, t, t, c.vagas || null, c.salario || null).run();
+    if (!existentes.has(c.id)) {
+      lote.push(env.DB.prepare('INSERT INTO concursos(id,banca,nome,url,situacao,uf,primeiro_visto,ultimo_visto,vagas,salario) VALUES(?,?,?,?,?,?,?,?,?,?)')
+        .bind(c.id, c.banca, c.nome, c.url, c.situacao, c.uf, t, t, c.vagas || null, c.salario || null));
       novos.push(c);
     } else {
-      await env.DB.prepare('UPDATE concursos SET nome=?, situacao=?, uf=COALESCE(?,uf), ultimo_visto=?, vagas=COALESCE(?,vagas), salario=COALESCE(?,salario) WHERE id=?')
-        .bind(c.nome, c.situacao, c.uf, t, c.vagas || null, c.salario || null, c.id).run();
-      if (ex.situacao !== 'abertas' && c.situacao === 'abertas') {
-        await avisarConcurso(env, c.id, `📝 Inscrições abertas: <b>${escHtml(c.nome)}</b> (${c.banca})`, c.url, 'inscricoes', orc);
-      }
+      lote.push(env.DB.prepare('UPDATE concursos SET nome=?, situacao=?, uf=COALESCE(?,uf), ultimo_visto=?, vagas=COALESCE(?,vagas), salario=COALESCE(?,salario) WHERE id=?')
+        .bind(c.nome, c.situacao, c.uf, t, c.vagas || null, c.salario || null, c.id));
+      if (existentes.get(c.id) !== 'abertas' && c.situacao === 'abertas') abriram.push(c);
     }
   }
+  for (let i = 0; i < lote.length; i += 40) await env.DB.batch(lote.slice(i, i + 40));
+  for (const c of abriram) await avisarConcurso(env, c.id, `📝 Inscrições abertas: <b>${escHtml(c.nome)}</b> (${c.banca})`, c.url, 'inscricoes', orc);
 
   // Na primeira vez que uma banca é lida, tudo é "novo": só grava, sem avisar.
   const porBanca = {};
   for (const c of novos) (porBanca[c.banca] ||= []).push(c);
   for (const [banca, lista] of Object.entries(porBanca)) {
     if (!(await estado(env, `base:${banca}`))) { await estado(env, `base:${banca}`, t); log.push(`${banca}: base inicial com ${lista.length}`); continue; }
-    for (const c of lista) {
+    for (const c of lista.slice(0, 30)) {
       await env.DB.prepare('INSERT INTO eventos(tipo,concurso_id,token,titulo,url,criado) VALUES(?,?,NULL,?,?,?)')
         .bind('novo_concurso', c.id, `Novo concurso na ${c.banca}: ${c.nome}`, c.url, t).run();
       const users = env.TELEGRAM_TOKEN ? await env.DB.prepare('SELECT chat_id FROM usuarios WHERE avisar_novos=1 AND chat_id IS NOT NULL').all() : { results: [] };
